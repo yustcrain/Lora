@@ -3,7 +3,14 @@ import torch.nn as nn
 
 
 class LoRA(nn.Module):
-    def __init__(self, in_features, out_features, rank, alpha):
+    def __init__(self, in_features, out_features, rank, alpha, base):
+        super().__init__()
+
+        self.base = base
+
+        for parm in self.base.parameters():
+            parm.requires_grad(False)
+        
         self.in_feature = in_features
         self.out_feature = out_features
 
@@ -14,19 +21,29 @@ class LoRA(nn.Module):
         self.B.weight.zero_()
         self.scale = alpha / rank
 
+
+
     def forward(self, x):
-        return self.B(self.A(x)) * self.scale
+        base_out = self.base(x)
+        return base_out+self.B(self.A(x)) * self.scale
 
+    def to_merge_linear(self):
+        merged = nn.Linear(
+                    self.base.in_features,
+                    self.base.out_features,
+                    bias=self.base.bias is not None,
+                ).to(
+                    device=self.base.weight.device,
+                    dtype=self.base.weight.dtype,
+                )
 
-def apply_lora(model, rank, alpha):
-    for name, module in model.named_modules():
-        if isinstance(model, nn.Linear) and model.in_features == model.out_features:
-            lora = LoRA(in_features=model.in_features, out_features=model.out_features, rank=rank, alpha=alpha)
-            setattr(module, "lora", lora)
-            model.requires_grad_(False)
-            original_forward = module.forward.requires_grad_
+        merged.weight.copy_(
+            self.base.weight + self.scaling * (self.B @ self.A)
+        )
 
-            def forward_with_lora(x, layer1, layer2):
-                return layer1(x) + layer2(x)
+        if self.base.bias is not None:
+            merged.bias.copy_(self.base.bias)
 
-            module.forward = forward_with_lora
+        merged.requires_grad_(False)
+        return merged.eval()
+    
